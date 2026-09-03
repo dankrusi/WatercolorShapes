@@ -1,0 +1,30 @@
+{
+  "name": "watercolor-shapes-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@11.1.1",
+  "scripts": {
+    "dev": "pnpm --filter @watercolor/demo dev",
+    "build": "pnpm --filter @watercolor/shapes build && pnpm --filter @watercolor/demo build",
+    "build:lib": "pnpm --filter @watercolor/shapes build",
+    "preview": "pnpm --filter @watercolor/demo preview",
+    "typecheck": "tsc --noEmit -p packages/watercolor/tsconfig.json && tsc --noEmit -p apps/demo/tsconfig.json",
+    "test": "node --import tsx packages/watercolor/test/run.ts && node --import tsx apps/demo/test/run.ts",
+    "bench": "node --import tsx tools/bench.ts",
+    "refs": "node --import tsx tools/render-refs.ts",
+    "samples": "node --import tsx tools/render-samples.ts",
+    "compare": "python tools/compare.py",
+    "sheet": "python tools/sheet.py",
+    "test:lib": "node --import tsx packages/watercolor/test/run.ts",
+    "test:demo": "node --import tsx apps/demo/test/run.ts",
+    "e2e": "node tools/e2e-demo.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "puppeteer-core": "^25.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11"
+  }
+}

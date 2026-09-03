@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Render output from the comparison and sample harnesses
+out/
+out-samples/
+out-search/
+
+# Tooling scratch
+__pycache__/
+.DS_Store
