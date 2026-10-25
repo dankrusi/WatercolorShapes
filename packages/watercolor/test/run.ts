@@ -619,6 +619,46 @@ test('the shape lands where the viewBox says it should', () => {
   assert(!dark(160, 100), 'x=160 should be outside');
 });
 
+test('a loose border strays from the outline differently on every seed', () => {
+  const opts = {
+    path: SQUARE,
+    color: '#000000',
+    width: 128,
+    supersample: 1,
+    background: null,
+    bakePaper: true,
+    params: { edgeWobble: 0, edgeCrystal: 0, fiberPinning: 0, borderLooseness: 1 },
+  } as const;
+  const silhouette = (seed: number, looseness: number): Uint8Array => {
+    const r = render({ ...opts, seed, params: { ...opts.params, borderLooseness: looseness } });
+    const s = new Uint8Array(r.width * r.height);
+    for (let i = 0; i < s.length; i++) s[i] = r.data[i * 4 + 3] > 127 ? 1 : 0;
+    return s;
+  };
+  const exact = silhouette(1, 0);
+  const a = silhouette(1, 1);
+  const b = silhouette(2, 1);
+  let area = 0;
+  let offExact = 0;
+  let offOther = 0;
+  for (let i = 0; i < exact.length; i++) {
+    area += exact[i];
+    if (a[i] !== exact[i]) offExact++;
+    if (a[i] !== b[i]) offOther++;
+  }
+  assert(offExact > area * 0.02, `loose outline barely moved off the exact one (${offExact} px)`);
+  assert(offOther > area * 0.02, `two seeds gave nearly the same loose outline (${offOther} px)`);
+  assert(offExact < area * 0.25, `loose outline lost the shape (${offExact} of ${area} px)`);
+});
+
+test('border looseness only touches the wash flavor', () => {
+  const plain = render({ ...baseOptions, flavor: 'bloom' });
+  const loose = render({ ...baseOptions, flavor: 'bloom', params: { borderLooseness: 1 } });
+  for (let i = 0; i < plain.data.length; i++) {
+    if (plain.data[i] !== loose.data[i]) throw new Error(`bloom changed at byte ${i}`);
+  }
+});
+
 test('an empty or unparseable path yields blank paper, not a crash', () => {
   for (const path of ['', '   ', 'not a path']) {
     const r = render({ path, color: '#000', width: 32, supersample: 1, seed: 1 });

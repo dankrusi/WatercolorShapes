@@ -125,6 +125,13 @@ export interface WatercolorParams {
   edgeGravity: number;
   /** Paper fibres pinning the advancing edge: high-frequency edge noise. */
   fiberPinning: number;
+  /**
+   * How loosely the brush follows the drawn outline: rounded corners, sides
+   * that belly out or fall short, the patch slipping a little off the line.
+   * Different on every seed, so an animated run reads as repainted rather
+   * than restamped. 0 keeps the outline exact. Wash flavor only.
+   */
+  borderLooseness: number;
 
   // --- Texture -----------------------------------------------------------
   /** Pigment settling into the paper tooth. Fine, high-contrast grain. */
@@ -293,6 +300,7 @@ export const PARAM_SPECS: ParamSpec[] = [
   { key: 'edgeCrystal', label: 'Edge faceting', group: 'Edge', min: 0, max: 0.03, step: 0.0002 },
   { key: 'edgeSoftness', label: 'Edge softness', group: 'Edge', min: 0.3, max: 6, step: 0.05, hint: 'Output pixels' },
   { key: 'fiberPinning', label: 'Fibre pinning', group: 'Edge', min: 0, max: 0.02, step: 0.0002 },
+  { key: 'borderLooseness', label: 'Border looseness', group: 'Edge', min: 0, max: 1, step: 0.01, flavors: ['wash'], hint: 'How freely the wash strays from the outline; 0 conforms exactly. Changes with every seed' },
   { key: 'edgeDarkening', label: 'Edge darkening', group: 'Edge', min: 0, max: 2, step: 0.01 },
   { key: 'edgeDarkeningWidth', label: 'Rim width', group: 'Edge', min: 0.002, max: 0.2, step: 0.001 },
   { key: 'edgeVariation', label: 'Rim variation', group: 'Edge', min: 0, max: 1, step: 0.01 },
@@ -347,6 +355,7 @@ export const BASE_PARAMS: WatercolorParams = {
   edgeVariation: 0.85,
   edgeGravity: 0.3,
   fiberPinning: 0.0022,
+  borderLooseness: 0,
 
   granulation: 1.76,
   mottling: 0.71,

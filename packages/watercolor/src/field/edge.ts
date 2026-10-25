@@ -18,7 +18,74 @@
  *   fibre    - individual fibres of the tooth holding or wicking the front
  */
 
+import { gaussianBlur } from './blur.js';
+import { factorFor, sampledField } from './sampled.js';
+import { sampleBilinear } from '../path/raster.js';
 import { fbm, warp, worley } from '../noise.js';
+import { Rng } from '../rng.js';
+
+export interface LoosenOptions {
+  sdf: Float32Array;
+  width: number;
+  height: number;
+  /** Characteristic shape size in working pixels. */
+  shapeSize: number;
+  seed: number;
+  /** 0 keeps the outline exactly; 1 is a quick, loose hand. */
+  amount: number;
+}
+
+/**
+ * Loosen the outline the painter was aiming at.
+ *
+ * `perturbEdge` models the water front landing a fraction of a millimetre off
+ * the line. This is the step before it: the brush itself not following the
+ * line. Nobody lays a wash exactly into a drawn shape - corners come out
+ * rounded because a loaded brush cannot turn on a point, one side bellies out
+ * while another falls short, and the whole patch sits a little off where the
+ * pencil put it. Each of those is a different accident on every attempt,
+ * which is what an animated sequence of seeds needs: a stamped outline with
+ * only its texture boiling reads as a filter, a hand-traced one as painting.
+ *
+ * Returns a new field, still close to a true distance, so everything
+ * downstream - including the form shading - treats it as the shape.
+ */
+export function loosenOutline(o: LoosenOptions): Float32Array {
+  const { sdf, width, height, shapeSize, seed } = o;
+  const amount = Math.max(0, o.amount);
+  if (amount <= 0) return sdf;
+
+  // Corners. Blurring a distance field leaves straight runs exactly where they
+  // were - a linear ramp is its own blur - and rounds only where the field
+  // bends, convex and concave alike.
+  const rounded = gaussianBlur(sdf, width, height, amount * 0.035 * shapeSize);
+
+  // Bellying and falling short, at the scale of the shape's own sides.
+  const unit = 1 / Math.max(1, shapeSize);
+  const freq = 1.7;
+  const ampWander = amount * 0.032 * shapeSize;
+  const wander = sampledField(width, height, factorFor(shapeSize / (freq * 6)), (x, y) =>
+    fbm(x * unit * freq, y * unit * freq, seed ^ 0x3c6ef372, { octaves: 3, grad: true, gain: 0.5 }),
+  );
+
+  // The patch as a whole slipping off the drawing, and running a touch
+  // generous or a touch mean.
+  const rng = new Rng(`loosen:${seed}`);
+  const angle = rng.next() * Math.PI * 2;
+  const slip = amount * 0.012 * shapeSize * Math.sqrt(rng.next());
+  const dx = Math.cos(angle) * slip;
+  const dy = Math.sin(angle) * slip;
+  const bias = amount * 0.006 * shapeSize * (rng.next() * 2 - 1);
+
+  const out = new Float32Array(sdf.length);
+  let i = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++, i++) {
+      out[i] = sampleBilinear(rounded, width, height, x - dx, y - dy) + ampWander * wander[i] + bias;
+    }
+  }
+  return out;
+}
 
 export interface EdgeOptions {
   sdf: Float32Array;

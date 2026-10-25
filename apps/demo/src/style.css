@@ -470,6 +470,10 @@ details.subgroup > div {
   margin: 6px 0 0;
 }
 
+.err.info {
+  color: var(--muted);
+}
+
 .spacer {
   flex: 1;
 }

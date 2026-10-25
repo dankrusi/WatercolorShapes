@@ -16,7 +16,7 @@
  */
 
 import { downsample } from './field/blur.js';
-import { maskFromSdf, perturbEdge } from './field/edge.js';
+import { loosenOutline, maskFromSdf, perturbEdge } from './field/edge.js';
 import { bloomField } from './flavors/bloom.js';
 import { TextureCache, type FieldContext } from './flavors/common.js';
 import { drybrushField } from './flavors/drybrush.js';
@@ -368,11 +368,21 @@ function paintShape(
       geometryCache.delete(oldest);
     }
   }
-  const sdf = geom.sdf;
   timings.raster = (timings.raster ?? 0) + (now() - tRaster);
 
   // --- boundary ----------------------------------------------------------
   const tEdge = now();
+  // The loosened outline replaces the drawn one for everything that follows,
+  // shading included: it is the shape that was actually painted. A copy, so
+  // the cached geometry stays exact.
+  const sdf = loosenOutline({
+    sdf: geom.sdf,
+    width: W,
+    height: H,
+    shapeSize,
+    seed: seedNum ^ 0x5851f42d,
+    amount: flavor === 'wash' ? params.borderLooseness : 0,
+  });
   const wetSdf = perturbEdge({
     sdf,
     width: W,

@@ -45,6 +45,11 @@ import {
 } from './workspaces.js';
 import './style.css';
 
+/** Label of the frame-sequence export button while it is idle. */
+const FRAMES_LABEL = 'Save PNG frames…';
+/** Upper bound on one frame-sequence export. */
+const MAX_FRAMES = 2000;
+
 /** Frames per second for the animated mode. */
 const ANIMATION_FPS = 8;
 const FRAME_BUDGET_MS = 1000 / ANIMATION_FPS;
@@ -219,12 +224,19 @@ function paint(msg: RenderResponse): void {
 }
 
 function showError(message: string | null): void {
+  errLine.classList.remove('info');
   if (message) {
     errLine.textContent = message;
     errLine.style.display = '';
   } else {
     errLine.style.display = 'none';
   }
+}
+
+/** Progress and outcomes, on the same line as errors but not in red. */
+function showStatus(message: string): void {
+  showError(message);
+  errLine.classList.add('info');
 }
 
 // ---------------------------------------------------------------- render --
@@ -621,6 +633,8 @@ const paddingSlider = slider({
   },
 });
 
+const framesButton = button(FRAMES_LABEL, () => void savePngFrames());
+
 const liveQualitySlider = slider({
   label: 'Live quality',
   min: 0.15,
@@ -679,7 +693,8 @@ panel.append(
     ]),
     el('div', { class: 'row' }, [bakeToggle.root, previewTransparentToggle.root]),
     el('div', { class: 'row' }, [
-      button('Save PNG', savePng, 'primary'),
+      button('Save PNG', () => void savePng(), 'primary'),
+      framesButton,
       el('span', { class: 'spacer' }),
       button('Copy JSON', copySettings),
     ]),
@@ -688,6 +703,11 @@ panel.append(
         'happens inside it: on, the paper goes in behind the pigment and the shape ' +
         'is a flat cut-out that looks the same on any background; off, the wash ' +
         'keeps its real translucency and tints whatever is behind it.',
+    ]),
+    el('p', { class: 'hint' }, [
+      'Save PNG frames asks for a folder and a frame count, then renders each frame ' +
+        'at export quality with a fresh random seed. Each file name carries its seed. ' +
+        'Browsers without folder access download the frames one by one instead.',
     ]),
   ]),
 );
@@ -795,40 +815,148 @@ function syncControls(): void {
 
 // --------------------------------------------------------------- commands --
 
-function savePng(): void {
+/** Options for an export render. */
+function exportOptions(): RenderOptions {
   const ws = active();
   // Always exported with transparency outside the shape, whatever the preview
   // happens to be showing. Bake paper decides only whether the pigment itself
   // carries that transparency too.
+  return buildOptions({ background: null, width: ws.width, supersample: ws.supersample });
+}
+
+/**
+ * Render once, outside the live queue.
+ *
+ * The id is never `inFlight`, so the preview's own handler ignores the reply
+ * and an export can share the worker with whatever is being previewed.
+ */
+function renderOnce(options: RenderOptions): Promise<RenderResponse> {
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    const once = (ev: MessageEvent<RenderResponse | RenderError>): void => {
+      if (ev.data.id !== id) return;
+      worker.removeEventListener('message', once);
+      if (ev.data.ok) resolve(ev.data);
+      else reject(new Error(ev.data.message));
+    };
+    worker.addEventListener('message', once);
+    worker.postMessage({ id, options } satisfies RenderRequest);
+  });
+}
+
+function encodePng(msg: RenderResponse): Promise<Blob> {
+  const off = document.createElement('canvas');
+  off.width = msg.width;
+  off.height = msg.height;
+  off
+    .getContext('2d')!
+    .putImageData(new ImageData(new Uint8ClampedArray(msg.data), msg.width, msg.height), 0, 0);
+  return new Promise((resolve, reject) => {
+    off.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('PNG encoding failed.'))), 'image/png');
+  });
+}
+
+function exportBase(ws: Workspace): string {
+  return `${exportFileName(ws).replace(/\.watercolour\.json$/, '')}-${ws.flavor}`;
+}
+
+async function savePng(): Promise<void> {
+  const ws = active();
+  try {
+    const msg = await renderOnce(exportOptions());
+    download(await encodePng(msg), `${exportBase(ws)}-${ws.seed}.png`);
+  } catch (err) {
+    showError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** The File System Access entry point, which only Chromium browsers have. */
+type DirectoryPicker = (options?: {
+  id?: string;
+  mode?: 'read' | 'readwrite';
+}) => Promise<FileSystemDirectoryHandle>;
+
+let lastFrameCount = 24;
+/** The running frame export, if any. Its button doubles as the cancel. */
+let frameJob: { cancelled: boolean } | null = null;
+
+async function savePngFrames(): Promise<void> {
+  if (frameJob) {
+    frameJob.cancelled = true;
+    return;
+  }
+
+  // The folder is asked for first: the picker needs the click's user
+  // activation, and a prompt in front of it can outlast that.
+  const picker = (window as unknown as { showDirectoryPicker?: DirectoryPicker })
+    .showDirectoryPicker;
+  let dir: FileSystemDirectoryHandle | null = null;
+  if (picker) {
+    try {
+      dir = await picker({ id: 'watercolour-frames', mode: 'readwrite' });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      showError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+  }
+
+  const answer = window.prompt('How many frames?', String(lastFrameCount));
+  if (answer === null) return;
+  const count = Number(answer.trim());
+  if (!Number.isInteger(count) || count < 1 || count > MAX_FRAMES) {
+    showError(`Enter a whole number of frames from 1 to ${MAX_FRAMES}.`);
+    return;
+  }
+  lastFrameCount = count;
+
+  // Everything is fixed up front, so switching tabs or moving a slider while
+  // the frames render cannot change what ends up in the folder.
+  const ws = active();
   let options: RenderOptions;
   try {
-    options = buildOptions({ background: null, width: ws.width, supersample: ws.supersample });
+    options = exportOptions();
   } catch (err) {
     showError(err instanceof Error ? err.message : String(err));
     return;
   }
-  const id = nextId++;
-  const once = (ev: MessageEvent<RenderResponse | RenderError>): void => {
-    if (ev.data.id !== id) return;
-    worker.removeEventListener('message', once);
-    if (!ev.data.ok) {
-      showError(ev.data.message);
-      return;
+  const base = exportBase(ws);
+  const digits = Math.max(4, String(count).length);
+
+  const job = { cancelled: false };
+  frameJob = job;
+  framesButton.textContent = 'Cancel frames';
+  let saved = 0;
+  try {
+    while (saved < count && !job.cancelled) {
+      showStatus(`Rendering frame ${saved + 1} of ${count}…`);
+      const seed = (Math.random() * 0xffffffff) >>> 0;
+      const blob = await encodePng(await renderOnce({ ...options, seed }));
+      // Numbered for anything that assembles a sequence, seeded so any single
+      // frame can be dialled back in and re-rendered.
+      const name = `${base}-${String(saved + 1).padStart(digits, '0')}-${seed}.png`;
+      if (dir) {
+        const file = await dir.getFileHandle(name, { create: true });
+        const out = await file.createWritable();
+        await out.write(blob);
+        await out.close();
+      } else {
+        download(blob, name);
+      }
+      saved++;
     }
-    const { width, height, data } = ev.data;
-    const off = document.createElement('canvas');
-    off.width = width;
-    off.height = height;
-    off
-      .getContext('2d')!
-      .putImageData(new ImageData(new Uint8ClampedArray(data), width, height), 0, 0);
-    const base = exportFileName(ws).replace(/\.watercolour\.json$/, '');
-    off.toBlob((blob) => {
-      if (blob) download(blob, `${base}-${ws.flavor}-${ws.seed}.png`);
-    }, 'image/png');
-  };
-  worker.addEventListener('message', once);
-  worker.postMessage({ id, options } satisfies RenderRequest);
+    const where = dir ? ` to ${dir.name}` : '';
+    showStatus(
+      job.cancelled
+        ? `Stopped after ${saved} of ${count} frames${where}.`
+        : `Saved ${count} frames${where}.`,
+    );
+  } catch (err) {
+    showError(`Frame ${saved + 1} failed: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    frameJob = null;
+    framesButton.textContent = FRAMES_LABEL;
+  }
 }
 
 async function copySettings(): Promise<void> {
