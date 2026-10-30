@@ -21,19 +21,29 @@
 /**
  * Evaluate `fn(x, y)` on a grid `factor` times coarser in each axis, then
  * bilinearly upsample to full resolution.
+ *
+ * With `mask`, only the samples that some masked pixel will interpolate from
+ * are evaluated; the rest are left at zero. Every consumer of these fields
+ * reads them inside the mask only, so the result is the same field - but a
+ * thin shape in a wide window no longer pays to texture the empty paper
+ * around it, which for a root hair is most of the window.
  */
 export function sampledField(
   width: number,
   height: number,
   factor: number,
   fn: (x: number, y: number) => number,
+  mask?: Float32Array,
 ): Float32Array {
   const f = Math.max(1, Math.round(factor));
   if (f === 1) {
     const out = new Float32Array(width * height);
     let i = 0;
     for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++, i++) out[i] = fn(x, y);
+      for (let x = 0; x < width; x++, i++) {
+        if (mask && mask[i] <= 0) continue;
+        out[i] = fn(x, y);
+      }
     }
     return out;
   }
@@ -42,11 +52,34 @@ export function sampledField(
   // between two real samples instead of clamping.
   const cw = Math.ceil(width / f) + 1;
   const ch = Math.ceil(height / f) + 1;
+  let active: Uint8Array | null = null;
+  if (mask) {
+    // A pixel reads the four coarse samples around it; mark those.
+    active = new Uint8Array(cw * ch);
+    let i = 0;
+    for (let y = 0; y < height; y++) {
+      const cy = (y / f) | 0;
+      const r0 = cy * cw;
+      const r1 = (cy + 1 < ch ? cy + 1 : cy) * cw;
+      for (let x = 0; x < width; x++, i++) {
+        if (mask[i] <= 0) continue;
+        const cx = (x / f) | 0;
+        const cx1 = cx + 1 < cw ? cx + 1 : cx;
+        active[r0 + cx] = 1;
+        active[r0 + cx1] = 1;
+        active[r1 + cx] = 1;
+        active[r1 + cx1] = 1;
+      }
+    }
+  }
   const coarse = new Float32Array(cw * ch);
   let ci = 0;
   for (let cy = 0; cy < ch; cy++) {
     const sy = cy * f;
-    for (let cx = 0; cx < cw; cx++, ci++) coarse[ci] = fn(cx * f, sy);
+    for (let cx = 0; cx < cw; cx++, ci++) {
+      if (active && !active[ci]) continue;
+      coarse[ci] = fn(cx * f, sy);
+    }
   }
 
   const out = new Float32Array(width * height);

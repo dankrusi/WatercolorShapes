@@ -49,7 +49,7 @@ export function layeredField(ctx: FieldContext): Float32Array {
   // short of the perimeter by the same margin, which thins the pigment in a
   // ring all the way round and reads as a soft outline - exactly the thing
   // this flavor is supposed to avoid.
-  const keepIn = Math.max(1, ctx.shapeSize * 0.006);
+  const keepIn = Math.max(1, ctx.edgeSize * 0.006);
 
   for (let k = 0; k < passes; k++) {
     if (k === 0) {
@@ -82,7 +82,7 @@ export function layeredField(ctx: FieldContext): Float32Array {
     const passRim =
       k === 0
         ? rim
-        : passRimFrom(passMask, width, height, Math.max(1, p.edgeDarkeningWidth * ctx.shapeSize * 0.8));
+        : passRimFrom(passMask, width, height, Math.max(1, p.edgeDarkeningWidth * ctx.edgeSize * 0.8));
 
     const w = weights[k] * passes * 0.62;
     // Later passes are accents on top of a full first lay-in, not equal

@@ -89,6 +89,26 @@ export interface ShapeInput {
   transform?: string;
   /** 0..1 overall opacity for this shape. */
   opacity?: number;
+  /**
+   * The shape's own seed, mixed with the render seed.
+   *
+   * Without one, a shape's paint is seeded from its position in the list, so
+   * inserting a shape ahead of it repaints it. Animated scenes add and remove
+   * shapes between frames; giving each a stable seed keeps its texture its own
+   * for as long as the render seed is held.
+   */
+  seed?: number | string;
+  /**
+   * Characteristic size the texture and edge noise are scaled to, in the
+   * shape's own user units. Defaults to the shape's bounding box.
+   *
+   * The noise is sampled in shape-relative coordinates so that a render at
+   * twice the resolution is the same painting resolved finer. For a shape
+   * that *changes size between frames* that is the wrong invariant: the
+   * mottling zooms with it and the edge crawls. Pinning the size to what the
+   * shape will finally be keeps the paint put while the outline grows.
+   */
+  noiseSize?: number;
 }
 
 export interface WatercolorParams {

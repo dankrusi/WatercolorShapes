@@ -14,6 +14,7 @@
     "bench": "node --import tsx tools/bench.ts",
     "refs": "node --import tsx tools/render-refs.ts",
     "samples": "node --import tsx tools/render-samples.ts",
+    "scene": "node --import tsx tools/render-scene.ts",
     "compare": "python tools/compare.py",
     "sheet": "python tools/sheet.py",
     "test:lib": "node --import tsx packages/watercolor/test/run.ts",

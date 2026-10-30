@@ -33,6 +33,14 @@ export interface LoosenOptions {
   seed: number;
   /** 0 keeps the outline exactly; 1 is a quick, loose hand. */
   amount: number;
+  /** Size the wander's noise is scaled to. Defaults to `shapeSize`. */
+  noiseSize?: number;
+  /**
+   * Canvas position of this field's top-left pixel. The noise is sampled in
+   * canvas space, so a field covering only part of the canvas still sees the
+   * same pattern the whole canvas would.
+   */
+  origin?: { x: number; y: number };
 }
 
 /**
@@ -61,11 +69,18 @@ export function loosenOutline(o: LoosenOptions): Float32Array {
   const rounded = gaussianBlur(sdf, width, height, amount * 0.035 * shapeSize);
 
   // Bellying and falling short, at the scale of the shape's own sides.
-  const unit = 1 / Math.max(1, shapeSize);
+  const noiseSize = Math.max(1, o.noiseSize ?? shapeSize);
+  const ox = o.origin?.x ?? 0;
+  const oy = o.origin?.y ?? 0;
+  const unit = 1 / noiseSize;
   const freq = 1.7;
   const ampWander = amount * 0.032 * shapeSize;
-  const wander = sampledField(width, height, factorFor(shapeSize / (freq * 6)), (x, y) =>
-    fbm(x * unit * freq, y * unit * freq, seed ^ 0x3c6ef372, { octaves: 3, grad: true, gain: 0.5 }),
+  const wander = sampledField(width, height, factorFor(noiseSize / (freq * 6)), (x, y) =>
+    fbm((x + ox) * unit * freq, (y + oy) * unit * freq, seed ^ 0x3c6ef372, {
+      octaves: 3,
+      grad: true,
+      gain: 0.5,
+    }),
   );
 
   // The patch as a whole slipping off the drawing, and running a touch
@@ -106,6 +121,10 @@ export interface EdgeOptions {
   fiber: number;
   /** Cell size for the faceting, as a fraction of shape size. */
   crystalScale?: number;
+  /** Size the noise is scaled to. Defaults to `shapeSize`. */
+  noiseSize?: number;
+  /** Canvas position of this field's top-left pixel; see `LoosenOptions`. */
+  origin?: { x: number; y: number };
 }
 
 /**
@@ -122,7 +141,9 @@ export function perturbEdge(o: EdgeOptions): Float32Array {
 
   // Noise coordinates are shape-relative, so rendering the same shape at
   // twice the resolution zooms into the same pattern instead of re-rolling it.
-  const unit = 1 / Math.max(1, shapeSize);
+  const unit = 1 / Math.max(1, o.noiseSize ?? shapeSize);
+  const ox = o.origin?.x ?? 0;
+  const oy = o.origin?.y ?? 0;
   const wobbleFreq = 3.2;
   const cellFreq = 1 / Math.max(0.008, o.crystalScale ?? 0.055);
   const octaves = Math.max(1, Math.round(o.detail));
@@ -141,8 +162,8 @@ export function perturbEdge(o: EdgeOptions): Float32Array {
         out[i] = d;
         continue;
       }
-      const nx = x * unit;
-      const ny = y * unit;
+      const nx = (x + ox) * unit;
+      const ny = (y + oy) * unit;
       let disp = 0;
       if (ampWobble > 0) {
         disp += ampWobble * fbm(nx * wobbleFreq, ny * wobbleFreq, seed ^ 0x27d4eb2d, {

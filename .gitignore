@@ -13,3 +13,6 @@ out-search/
 # Tooling scratch
 __pycache__/
 .DS_Store
+
+# Render output from the scene harness
+out-scene/

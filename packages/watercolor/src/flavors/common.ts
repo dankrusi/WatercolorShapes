@@ -20,8 +20,17 @@ import type { WatercolorParams } from '../types.js';
 export interface FieldContext {
   width: number;
   height: number;
-  /** Characteristic shape size in working pixels (max of the bbox sides). */
+  /**
+   * Size the texture noise is scaled to, in working pixels. The shape's
+   * bounding box unless the input pinned it with `noiseSize`.
+   */
   shapeSize: number;
+  /**
+   * Size the edge effects are scaled to, in working pixels. Equal to
+   * `shapeSize` for a solid shape and smaller for a thin one, so a long
+   * sliver is not given a rim or a wobble sized for a disc of its length.
+   */
+  edgeSize: number;
   /** Ideal signed distance, positive inside. */
   sdf: Float32Array;
   /** Perturbed signed distance: where the wash actually lands. */
@@ -87,14 +96,26 @@ export class TextureCache {
     private readonly paper: Float32Array,
     private readonly params: WatercolorParams,
     private readonly seed: number,
+    /** Canvas position of the field's top-left pixel; the noise is sampled in canvas space. */
+    private readonly origin: { x: number; y: number } = { x: 0, y: 0 },
+    /** Where the textures will be read. Nothing is evaluated outside it. */
+    private readonly mask?: Float32Array,
   ) {}
 
   private build(key: string, featurePx: number, fn: (nx: number, ny: number) => number, maxFactor = 6): Float32Array {
     const hit = this.cache.get(key);
     if (hit) return hit;
     const u = this.unit;
+    const ox = this.origin.x;
+    const oy = this.origin.y;
     const f = factorFor(featurePx, maxFactor);
-    const field = sampledField(this.width, this.height, f, (x, y) => fn(x * u, y * u));
+    const field = sampledField(
+      this.width,
+      this.height,
+      f,
+      (x, y) => fn((x + ox) * u, (y + oy) * u),
+      this.mask,
+    );
     this.cache.set(key, field);
     return field;
   }

@@ -10,7 +10,7 @@
  * function it leans on is.
  */
 
-import { BASE_PARAMS, resolveParams } from '@watercolor/shapes';
+import { BASE_PARAMS, resolveParams, SCENES } from '@watercolor/shapes';
 
 import {
   cloneWorkspace,
@@ -18,6 +18,7 @@ import {
   exportFileName,
   exportWorkspace,
   isSvgSource,
+  MAX_FRAMES,
   MAX_SVG_CHARS,
   normalizeHex,
   normalizeParams,
@@ -250,6 +251,52 @@ test('WorkspaceError is what import failures throw', () => {
     return;
   }
   throw new Error('did not throw');
+});
+
+// -------------------------------------------------------------- animation --
+
+test('a new workspace is a still, with its animation settings ready', () => {
+  const ws = createWorkspace(0);
+  assert(ws.mode === 'svg', `mode was ${ws.mode}`);
+  assert(ws.scene === SCENES[0].id, `scene was ${ws.scene}`);
+  assert(ws.time === 1, 'starts on the finished scene');
+  assert(ws.frameCount === 120 && ws.repaintEvery === 1, 'frame defaults');
+});
+
+test('animation settings survive a round trip', () => {
+  const ws = createWorkspace(0);
+  ws.mode = 'scene';
+  ws.scene = SCENES[0].id;
+  ws.time = 0.37;
+  ws.frameCount = 240;
+  ws.repaintEvery = 3;
+  ws.layoutSeed = 99;
+  const [back] = parseImport(JSON.stringify(exportWorkspace(ws)));
+  assert(back.mode === 'scene', 'mode');
+  assert(back.scene === ws.scene, 'scene');
+  assert(back.time === 0.37, `time was ${back.time}`);
+  assert(back.frameCount === 240, `frameCount was ${back.frameCount}`);
+  assert(back.repaintEvery === 3, `repaintEvery was ${back.repaintEvery}`);
+  assert(back.layoutSeed === 99, `layoutSeed was ${back.layoutSeed}`);
+});
+
+test('an unknown scene falls back to the SVG rather than an empty stage', () => {
+  const ws = normalizeWorkspace({ svg: SVG, mode: 'scene', animation: { scene: 'cathedral' } });
+  assert(ws.mode === 'svg', `mode was ${ws.mode}`);
+  assert(ws.scene === SCENES[0].id, `scene was ${ws.scene}`);
+});
+
+test('animation settings are coerced into range', () => {
+  const ws = normalizeWorkspace({
+    svg: SVG,
+    mode: 'scene',
+    animation: { scene: SCENES[0].id, time: 7, frameCount: 1e9, repaintEvery: 0, layoutSeed: -5 },
+  });
+  assert(ws.mode === 'scene', 'a known scene is kept');
+  assert(ws.time === 1, `time was ${ws.time}`);
+  assert(ws.frameCount === MAX_FRAMES, `frameCount was ${ws.frameCount}`);
+  assert(ws.repaintEvery === 1, `repaintEvery was ${ws.repaintEvery}`);
+  assert(ws.layoutSeed === 0, `layoutSeed was ${ws.layoutSeed}`);
 });
 
 // ------------------------------------------------------------------ done --

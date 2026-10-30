@@ -16,12 +16,17 @@ import {
   BASE_PARAMS,
   FLAVORS,
   FLAVOR_INFO,
+  getScene,
+  normalizeSeed,
   PARAM_SPECS,
   parseSvg,
   resolveParams,
+  resolveSceneOptions,
+  SCENES,
   type Flavor,
   type ParamGroup,
   type RenderOptions,
+  type Scene,
   type ShapeInput,
   type WatercolorParams,
 } from '@watercolor/shapes';
@@ -36,6 +41,8 @@ import {
   exportFileName,
   exportWorkspace,
   isSvgSource,
+  MAX_FRAMES,
+  MAX_REPAINT,
   MAX_SVG_CHARS,
   parseImport,
   WorkspaceError,
@@ -45,10 +52,9 @@ import {
 } from './workspaces.js';
 import './style.css';
 
-/** Label of the frame-sequence export button while it is idle. */
+/** Labels of the frame-sequence export button while it is idle. */
 const FRAMES_LABEL = 'Save PNG frames…';
-/** Upper bound on one frame-sequence export. */
-const MAX_FRAMES = 2000;
+const ANIMATION_FRAMES_LABEL = 'Save animation frames…';
 
 /** Frames per second for the animated mode. */
 const ANIMATION_FPS = 8;
@@ -80,8 +86,20 @@ function edit(fn: (ws: Workspace) => void): void {
 }
 
 // Animation is a property of the session you are in, not of the painting you
-// are making, so it is deliberately not part of a workspace.
+// are making, so it is deliberately not part of a workspace. The same goes
+// for a scene being played: the workspace remembers where in the scene you
+// are, not whether it was moving.
 let animating = false;
+let playing = false;
+
+/**
+ * Whether frames are being produced on a clock. Only the seed animation
+ * trims its quality to hold its rate; a playing scene renders every frame at
+ * full quality and takes as long as that takes.
+ */
+function live(): boolean {
+  return animating || playing;
+}
 
 // ---------------------------------------------------------------- layout --
 
@@ -96,6 +114,8 @@ const statTime = el('b', {}, ['-']);
 const statFps = el('b', {}, ['-']);
 const statSeed = el('b', {}, ['-']);
 const statShapes = el('b', {}, ['-']);
+const statFrame = el('b', {}, ['-']);
+const statFrameWrap = el('span', {}, ['frame ', statFrame]);
 const errLine = el('p', { class: 'err' });
 errLine.style.display = 'none';
 
@@ -111,6 +131,7 @@ const stage = el('div', { class: 'stage' }, [
     el('span', {}, ['fps ', statFps]),
     el('span', {}, ['seed ', statSeed]),
     el('span', {}, ['shapes ', statShapes]),
+    statFrameWrap,
   ]),
   errLine,
   el('div', { class: 'drop-hint' }, ['Release to load']),
@@ -191,7 +212,7 @@ worker.addEventListener('message', (ev: MessageEvent<RenderResponse | RenderErro
   const now = performance.now();
   // Only meaningful while animating: between two manual renders the gap is
   // however long you took to move the slider, which is not a frame rate.
-  if (animating && lastFrameAt) {
+  if (live() && lastFrameAt) {
     const fps = 1000 / Math.max(1, now - lastFrameAt);
     // Smoothed, because a single frame's timing bounces around too much to read.
     fpsAvg = fpsAvg ? fpsAvg * 0.75 + fps * 0.25 : fps;
@@ -241,33 +262,80 @@ function showStatus(message: string): void {
 
 // ---------------------------------------------------------------- render --
 
-function buildOptions(overrides: Partial<RenderOptions> = {}): RenderOptions {
-  const ws = active();
-  const parsed = parseSvg(ws.svg);
-  let shapes: ShapeInput[] = parsed.shapes;
+/** The scene a workspace is showing, if it is showing one. */
+function sceneOf(ws: Workspace): Scene | null {
+  return ws.mode === 'scene' ? (getScene(ws.scene) ?? null) : null;
+}
+
+/** Which frame of an export the preview time falls on. */
+function frameIndexOf(time: number, frameCount: number): number {
+  return Math.round(time * Math.max(0, frameCount - 1));
+}
+
+/**
+ * The paint seed for one frame of an animation: the workspace seed, stepped
+ * once per `repaintEvery` frames. Derived rather than incremented so any frame
+ * can be re-rendered on its own, and so the preview at a given time shows the
+ * exact frame the export will write.
+ */
+function frameSeed(ws: Workspace, frameIndex: number): number {
+  return normalizeSeed(`${ws.seed}:frame:${Math.floor(frameIndex / Math.max(1, ws.repaintEvery))}`);
+}
+
+/** The shapes, viewBox and seed for a frame of a workspace. */
+function frameInput(
+  ws: Workspace,
+  time: number,
+  frameIndex: number,
+): { shapes: ShapeInput[]; viewBox: RenderOptions['viewBox']; seed: number } {
+  const scene = sceneOf(ws);
+  let shapes: ShapeInput[];
+  let viewBox: RenderOptions['viewBox'];
+  let seed = ws.seed;
+  if (scene) {
+    seed = frameSeed(ws, frameIndex);
+    shapes = scene.frame(time, ws.layoutSeed, ws.sceneOptions, seed);
+    viewBox = scene.viewBox;
+  } else {
+    const parsed = parseSvg(ws.svg);
+    shapes = parsed.shapes;
+    viewBox = parsed.viewBox ?? undefined;
+  }
   if (ws.overrideColor) {
-    // Strip whatever the file said, so the picker is authoritative.
+    // Strip whatever the source said, so the picker is authoritative.
     shapes = shapes.map((s) => ({ ...s, color: ws.color, gradient: undefined }));
   }
+  return { shapes, viewBox, seed };
+}
+
+function buildOptions(overrides: Partial<RenderOptions> = {}): RenderOptions {
+  const ws = active();
+  const index = frameIndexOf(ws.time, ws.frameCount);
+  const { shapes, viewBox, seed } = frameInput(ws, ws.time, index);
   statShapes.textContent = String(shapes.length);
+  const scene = sceneOf(ws);
+  statFrameWrap.style.display = scene ? '' : 'none';
+  if (scene) {
+    statFrame.textContent = `${index + 1}/${ws.frameCount} (${(ws.time * scene.duration).toFixed(2)}s)`;
+  }
   // Animation renders at a reduced quality. The frame budget is not negotiable
   // if the mode is to run at its stated rate, and at export quality a single
   // frame costs several times that; cutting pixels is the only lever that does
   // not change what the image *is*. The seed sequence and every parameter stay
   // identical, so what you watch is what you will export.
-  const live = animating && overrides.width === undefined;
-  const width = live ? Math.max(96, Math.round(ws.width * ws.liveQuality * liveScale)) : ws.width;
+  const trimmed = animating && overrides.width === undefined;
+  const width = trimmed ? Math.max(96, Math.round(ws.width * ws.liveQuality * liveScale)) : ws.width;
   return {
     shapes,
-    viewBox: parsed.viewBox ?? undefined,
+    viewBox,
     color: ws.color,
     width,
-    supersample: live ? 1 : ws.supersample,
+    supersample: trimmed ? 1 : ws.supersample,
     padding: ws.padding,
     paper: ws.paper,
     background: ws.previewTransparent ? null : ws.paper,
     bakePaper: ws.bakePaper,
-    seed: ws.seed,
+    seed,
     flavor: ws.flavor,
     params: ws.params,
     ...overrides,
@@ -326,6 +394,73 @@ function setAnimating(on: boolean): void {
   }, FRAME_BUDGET_MS);
 }
 
+// -------------------------------------------------------------- playback --
+
+let playTimer: number | null = null;
+/** When the frame now showing (or rendering) was asked for. */
+let playRequestedAt = 0;
+/** Pause on the finished scene before it starts over. */
+const LOOP_HOLD_MS = 900;
+
+/**
+ * Play the scene: step through its export frames in order, each rendered at
+ * full quality - exactly the frames an export would write. The next frame is
+ * asked for when the previous one has landed and the scene's own frame
+ * interval has passed, so playback holds the stated pace on a machine that
+ * can render that fast and simply runs slower on one that cannot. No frame
+ * is ever skipped and nothing is ever trimmed.
+ */
+function setPlaying(on: boolean): void {
+  playing = on;
+  playToggle.set(on);
+  if (playTimer !== null) {
+    clearInterval(playTimer);
+    playTimer = null;
+  }
+  liveScale = 1;
+  if (!on) {
+    fpsAvg = 0;
+    lastFrameAt = 0;
+    statFps.textContent = '-';
+    return;
+  }
+  // Pressing play on the finished scene starts it over.
+  if (active().time >= 0.999) {
+    edit((ws) => {
+      ws.time = 0;
+    });
+    timeSlider.set(0);
+  }
+  playRequestedAt = performance.now();
+  requestRender();
+  playTimer = window.setInterval(() => {
+    if (inFlight) return;
+    const ws = active();
+    const scene = sceneOf(ws);
+    if (!scene) {
+      setPlaying(false);
+      return;
+    }
+    const count = Math.max(1, ws.frameCount);
+    const interval = (scene.duration * 1000) / Math.max(1, count - 1);
+    const since = performance.now() - playRequestedAt;
+    let index = frameIndexOf(ws.time, count) + 1;
+    if (index >= count) {
+      if (since < interval + LOOP_HOLD_MS) return;
+      index = 0;
+    } else if (since < interval) {
+      return;
+    }
+    const t = count > 1 ? index / (count - 1) : 1;
+    edit((w) => {
+      w.time = t;
+    });
+    timeSlider.set(t);
+    playRequestedAt = performance.now();
+    requestRender();
+  }, 25);
+}
+
 // ------------------------------------------------------------ workspaces --
 
 function refreshTabs(): void {
@@ -335,6 +470,11 @@ function refreshTabs(): void {
 function syncHeader(): void {
   const ws = active();
   stageTitle.textContent = ws.title;
+  const scene = sceneOf(ws);
+  if (scene) {
+    stageSource.textContent = scene.name === ws.title ? scene.blurb : `${scene.name} — ${scene.blurb}`;
+    return;
+  }
   // The source line is only worth the space when it says something the title
   // does not, which it does not while the title is still following the source.
   const redundant = ws.sourceName.replace(/\.svg$/i, '') === ws.title;
@@ -345,9 +485,11 @@ function setActiveWorkspace(id: string): void {
   if (!session.workspaces.some((w) => w.id === id)) return;
   session.activeId = id;
   store.save(session);
-  // Anything queued belongs to the workspace you just left.
+  // Anything queued belongs to the workspace you just left, and so does a
+  // scene that was playing: time is the workspace's, the clock is not.
   pendingRender = false;
   liveScale = 1;
+  if (playing) setPlaying(false);
   refreshTabs();
   syncControls();
   requestRender();
@@ -380,13 +522,30 @@ function closeWorkspace(id: string): void {
 }
 
 function adoptSource(svg: string, sourceName: string, color?: string): void {
+  if (playing) setPlaying(false);
   edit((ws) => {
+    ws.mode = 'svg';
     ws.svg = svg;
     ws.sourceName = sourceName;
     if (color) ws.color = color;
     // An auto title follows the source; once you have named the tab it is
     // yours, and loading a different file will not quietly rename it.
     if (ws.titleAuto) ws.title = sourceName.replace(/\.svg$/i, '');
+  });
+  refreshTabs();
+  syncControls();
+  requestRender();
+}
+
+/** Switch the workspace to a scene. Its SVG is kept, so picking a sample again loses nothing. */
+function adoptScene(scene: Scene): void {
+  if (playing) setPlaying(false);
+  edit((ws) => {
+    ws.mode = 'scene';
+    if (ws.scene !== scene.id) ws.sceneOptions = resolveSceneOptions(scene.options);
+    ws.scene = scene.id;
+    ws.sourceName = scene.name;
+    if (ws.titleAuto) ws.title = scene.name;
   });
   refreshTabs();
   syncControls();
@@ -491,11 +650,22 @@ importInput.addEventListener('change', () => {
 });
 
 const CUSTOM_OPTION = '— uploaded —';
+const SCENE_PREFIX = 'scene:';
 const sampleSelect = el('select') as HTMLSelectElement;
 sampleSelect.append(el('option', { value: CUSTOM_OPTION, disabled: '' }, [CUSTOM_OPTION]));
-for (const s of SAMPLES) sampleSelect.append(el('option', { value: s.name }, [s.name]));
+const shapeGroup = el('optgroup', { label: 'Shapes' });
+for (const s of SAMPLES) shapeGroup.append(el('option', { value: s.name }, [s.name]));
+const sceneGroup = el('optgroup', { label: 'Animations' });
+for (const sc of SCENES) sceneGroup.append(el('option', { value: SCENE_PREFIX + sc.id }, [sc.name]));
+sampleSelect.append(shapeGroup, sceneGroup);
 sampleSelect.addEventListener('change', () => {
-  const s = SAMPLES.find((x) => x.name === sampleSelect.value);
+  const v = sampleSelect.value;
+  if (v.startsWith(SCENE_PREFIX)) {
+    const sc = getScene(v.slice(SCENE_PREFIX.length));
+    if (sc) adoptScene(sc);
+    return;
+  }
+  const s = SAMPLES.find((x) => x.name === v);
   if (s) adoptSource(s.svg, s.name, s.color);
 });
 
@@ -544,7 +714,7 @@ paperInput.addEventListener('input', () => {
   requestRender();
 });
 
-const seedField = el('input', { type: 'number', min: '0', step: '1' }) as HTMLInputElement;
+const seedField = el('input', { type: 'number', min: '0', step: '1', 'aria-label': 'Seed' }) as HTMLInputElement;
 seedField.style.width = '108px';
 seedField.addEventListener('change', () => {
   const v = Number(seedField.value);
@@ -635,6 +805,183 @@ const paddingSlider = slider({
 
 const framesButton = button(FRAMES_LABEL, () => void savePngFrames());
 
+const timeSlider = slider({
+  label: 'Time',
+  min: 0,
+  max: 1,
+  step: 0.001,
+  value: 1,
+  hint: 'Where in the scene the preview sits. The export spreads its frames evenly over this range',
+  format: (v) => {
+    const scene = sceneOf(active());
+    return scene ? `${(v * scene.duration).toFixed(2)}s` : v.toFixed(3);
+  },
+  onInput: (v) => {
+    if (playing) setPlaying(false);
+    edit((ws) => {
+      ws.time = v;
+    });
+    requestRender();
+  },
+});
+
+const playToggle = toggle(
+  'Play',
+  false,
+  setPlaying,
+  'Step through the export frames at full quality, looping; as fast as the scene runs if the machine can, slower if not',
+);
+
+function numberField(
+  label: string,
+  min: number,
+  max: number,
+  width: string,
+  onChange: (v: number) => void,
+): HTMLInputElement {
+  const input = el('input', {
+    type: 'number',
+    min: String(min),
+    max: String(max),
+    step: '1',
+    'aria-label': label,
+  }) as HTMLInputElement;
+  input.style.width = width;
+  input.addEventListener('change', () => {
+    const v = Math.round(Number(input.value));
+    if (!Number.isFinite(v)) return;
+    const clamped = Math.min(max, Math.max(min, v));
+    input.value = String(clamped);
+    onChange(clamped);
+  });
+  return input;
+}
+
+const framesField = numberField('Frames', 1, MAX_FRAMES, '76px', (v) => {
+  edit((ws) => {
+    ws.frameCount = v;
+  });
+  syncModeControls();
+  requestRender();
+});
+
+const repaintField = numberField('Repaint every', 1, MAX_REPAINT, '60px', (v) => {
+  edit((ws) => {
+    ws.repaintEvery = v;
+  });
+  requestRender();
+});
+
+const layoutSeedField = numberField('Layout seed', 0, 0xffffffff, '96px', (v) => {
+  edit((ws) => {
+    ws.layoutSeed = v;
+  });
+  requestRender();
+});
+
+const frameRate = el('span', { class: 'hint-inline' }, ['']);
+
+// The scene's own knobs, built from the metadata it declares, the same way
+// the renderer's sliders are built from PARAM_SPECS.
+const sceneOptionBox = el('div', { class: 'scene-options' });
+const sceneOptionSliders = new Map<string, SliderHandle>();
+let builtOptionsFor: string | null = null;
+
+function buildSceneOptions(scene: Scene): void {
+  if (builtOptionsFor === scene.id) return;
+  builtOptionsFor = scene.id;
+  sceneOptionSliders.clear();
+  sceneOptionBox.replaceChildren();
+  const specs = scene.options ?? [];
+  if (specs.length === 0) return;
+  const ws = active();
+  for (const spec of specs) {
+    const handle = slider({
+      label: spec.label,
+      min: spec.min,
+      max: spec.max,
+      step: spec.step,
+      value: ws.sceneOptions[spec.key] ?? spec.default,
+      hint: spec.hint,
+      onInput: (v) => {
+        edit((w) => {
+          w.sceneOptions = { ...w.sceneOptions, [spec.key]: v };
+        });
+        requestRender();
+      },
+    });
+    sceneOptionSliders.set(spec.key, handle);
+    sceneOptionBox.append(handle.root);
+  }
+  sceneOptionBox.append(
+    el('div', { class: 'row' }, [
+      button('Reset plant', () => {
+        edit((w) => {
+          w.sceneOptions = resolveSceneOptions(scene.options);
+        });
+        syncModeControls();
+        requestRender();
+      }),
+    ]),
+  );
+}
+
+function seekTo(time: number): void {
+  if (playing) setPlaying(false);
+  edit((ws) => {
+    ws.time = time;
+  });
+  timeSlider.set(time);
+  requestRender();
+}
+
+const animationGroup = group('Animation', [
+  timeSlider.root,
+  el('div', { class: 'row' }, [
+    playToggle.root,
+    button('⏮', () => seekTo(0), 'icon'),
+    button('⏭', () => seekTo(1), 'icon'),
+    el('span', { class: 'spacer' }),
+    frameRate,
+  ]),
+  el('div', { class: 'row' }, [
+    el('label', { class: 'inline' }, [framesField, 'frames']),
+    el('label', { class: 'inline' }, [repaintField, 'repaint every']),
+  ]),
+  el('div', { class: 'row' }, [
+    el('label', { class: 'inline' }, [layoutSeedField, 'Layout seed']),
+    button('Randomise', () => {
+      edit((ws) => {
+        ws.layoutSeed = (Math.random() * 0xffffffff) >>> 0;
+      });
+      layoutSeedField.value = String(active().layoutSeed);
+      requestRender();
+    }),
+  ]),
+  sceneOptionBox,
+  el('p', { class: 'hint' }, [
+    'A scene is drawn afresh at every moment: any number of shapes, each in its own ' +
+      'shade, all painted with the settings below on one sheet. Play steps through the ' +
+      'export frames at full quality, never trimmed: at the scene\'s own pace when the ' +
+      'machine keeps up, slower when it does not. Frames sets how many the export ' +
+      'writes across the whole scene. Repaint every holds the paint seed for that many ' +
+      'frames: 1 repaints every frame, as the seed animation does; 2 or 3 at a higher ' +
+      'frame rate gives the look of animation drawn on twos. The layout seed moves what ' +
+      'the scene leaves to chance, such as where the roots branch.',
+  ]),
+]);
+
+const framesHint = el('p', { class: 'hint' });
+const FRAMES_HINT_SVG =
+  'Save PNG frames asks for a folder and a frame count, then renders each frame ' +
+  'at export quality with a fresh random seed. Each file name carries its seed. ' +
+  'Browsers without folder access download the frames one by one instead.';
+const FRAMES_HINT_SCENE =
+  'Save animation frames asks for a folder, then renders the scene from start to end ' +
+  'at export quality, one numbered file per frame, transparent outside the painting ' +
+  'with the paper baked in behind it as the toggles above decide. The last frame is ' +
+  'the finished scene. Browsers without folder access download the frames one by one.';
+
 const liveQualitySlider = slider({
   label: 'Live quality',
   min: 0.15,
@@ -660,6 +1007,8 @@ panel.append(
     ]),
     el('p', { class: 'hint' }, ['Gradient fills drive the shading; solid fills get form shading.']),
   ]),
+
+  animationGroup,
 
   group('Algorithm', [flavorGrid, flavorBlurb]),
 
@@ -704,11 +1053,7 @@ panel.append(
         'is a flat cut-out that looks the same on any background; off, the wash ' +
         'keeps its real translucency and tints whatever is behind it.',
     ]),
-    el('p', { class: 'hint' }, [
-      'Save PNG frames asks for a folder and a frame count, then renders each frame ' +
-        'at export quality with a fresh random seed. Each file name carries its seed. ' +
-        'Browsers without folder access download the frames one by one instead.',
-    ]),
+    framesHint,
   ]),
 );
 
@@ -796,9 +1141,6 @@ panel.append(
 function syncControls(): void {
   const ws = active();
   syncHeader();
-  sampleSelect.value = SAMPLES.some((s) => s.name === ws.sourceName)
-    ? ws.sourceName
-    : CUSTOM_OPTION;
   colorInput.value = ws.color;
   paperInput.value = ws.paper;
   seedField.value = String(ws.seed);
@@ -810,7 +1152,35 @@ function syncControls(): void {
   supersampleSlider.set(ws.supersample);
   paddingSlider.set(ws.padding);
   liveQualitySlider.set(ws.liveQuality);
+  timeSlider.set(ws.time);
+  playToggle.set(playing);
+  framesField.value = String(ws.frameCount);
+  repaintField.value = String(ws.repaintEvery);
+  layoutSeedField.value = String(ws.layoutSeed);
+  syncModeControls();
   syncFlavorControls();
+}
+
+/** Show the animation controls only when there is an animation. */
+function syncModeControls(): void {
+  const ws = active();
+  const scene = sceneOf(ws);
+  animationGroup.style.display = scene ? '' : 'none';
+  if (!frameJob) framesButton.textContent = scene ? ANIMATION_FRAMES_LABEL : FRAMES_LABEL;
+  framesHint.textContent = scene ? FRAMES_HINT_SCENE : FRAMES_HINT_SVG;
+  if (scene) {
+    const fps = ws.frameCount / scene.duration;
+    frameRate.textContent = `${scene.duration}s at ${fps.toFixed(fps % 1 ? 1 : 0)} fps`;
+    buildSceneOptions(scene);
+    for (const [key, handle] of sceneOptionSliders) {
+      if (key in ws.sceneOptions) handle.set(ws.sceneOptions[key]);
+    }
+  }
+  sampleSelect.value = scene
+    ? SCENE_PREFIX + scene.id
+    : SAMPLES.some((s) => s.name === ws.sourceName)
+      ? ws.sourceName
+      : CUSTOM_OPTION;
 }
 
 // --------------------------------------------------------------- commands --
@@ -864,7 +1234,8 @@ async function savePng(): Promise<void> {
   const ws = active();
   try {
     const msg = await renderOnce(exportOptions());
-    download(await encodePng(msg), `${exportBase(ws)}-${ws.seed}.png`);
+    const tag = sceneOf(ws) ? `t${ws.time.toFixed(3)}-${msg.seed}` : String(ws.seed);
+    download(await encodePng(msg), `${exportBase(ws)}-${tag}.png`);
   } catch (err) {
     showError(err instanceof Error ? err.message : String(err));
   }
@@ -901,18 +1272,31 @@ async function savePngFrames(): Promise<void> {
     }
   }
 
-  const answer = window.prompt('How many frames?', String(lastFrameCount));
+  const scene = sceneOf(active());
+  const answer = window.prompt(
+    scene ? `How many frames for the whole ${scene.duration}s scene?` : 'How many frames?',
+    String(scene ? active().frameCount : lastFrameCount),
+  );
   if (answer === null) return;
   const count = Number(answer.trim());
   if (!Number.isInteger(count) || count < 1 || count > MAX_FRAMES) {
     showError(`Enter a whole number of frames from 1 to ${MAX_FRAMES}.`);
     return;
   }
-  lastFrameCount = count;
+  if (scene) {
+    edit((w) => {
+      w.frameCount = count;
+    });
+    framesField.value = String(count);
+    syncModeControls();
+  } else {
+    lastFrameCount = count;
+  }
+  if (playing) setPlaying(false);
 
   // Everything is fixed up front, so switching tabs or moving a slider while
   // the frames render cannot change what ends up in the folder.
-  const ws = active();
+  const ws: Workspace = { ...active(), params: { ...active().params }, frameCount: count };
   let options: RenderOptions;
   try {
     options = exportOptions();
@@ -923,6 +1307,25 @@ async function savePngFrames(): Promise<void> {
   const base = exportBase(ws);
   const digits = Math.max(4, String(count).length);
 
+  // What frame i is. A still is repainted with a fresh random seed each
+  // time; a scene is advanced through its time, with the paint seed stepped
+  // as the workspace says.
+  const frameAt = (i: number): { options: RenderOptions; name: string } => {
+    const index = String(i + 1).padStart(digits, '0');
+    if (scene) {
+      const time = count > 1 ? i / (count - 1) : 1;
+      const input = frameInput(ws, time, i);
+      return {
+        options: { ...options, shapes: input.shapes, viewBox: input.viewBox, seed: input.seed },
+        name: `${base}-${index}.png`,
+      };
+    }
+    const seed = (Math.random() * 0xffffffff) >>> 0;
+    // Numbered for anything that assembles a sequence, seeded so any single
+    // frame can be dialled back in and re-rendered.
+    return { options: { ...options, seed }, name: `${base}-${index}-${seed}.png` };
+  };
+
   const job = { cancelled: false };
   frameJob = job;
   framesButton.textContent = 'Cancel frames';
@@ -930,11 +1333,9 @@ async function savePngFrames(): Promise<void> {
   try {
     while (saved < count && !job.cancelled) {
       showStatus(`Rendering frame ${saved + 1} of ${count}…`);
-      const seed = (Math.random() * 0xffffffff) >>> 0;
-      const blob = await encodePng(await renderOnce({ ...options, seed }));
-      // Numbered for anything that assembles a sequence, seeded so any single
-      // frame can be dialled back in and re-rendered.
-      const name = `${base}-${String(saved + 1).padStart(digits, '0')}-${seed}.png`;
+      const frame = frameAt(saved);
+      const blob = await encodePng(await renderOnce(frame.options));
+      const name = frame.name;
       if (dir) {
         const file = await dir.getFileHandle(name, { create: true });
         const out = await file.createWritable();
@@ -955,7 +1356,7 @@ async function savePngFrames(): Promise<void> {
     showError(`Frame ${saved + 1} failed: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     frameJob = null;
-    framesButton.textContent = FRAMES_LABEL;
+    framesButton.textContent = sceneOf(active()) ? ANIMATION_FRAMES_LABEL : FRAMES_LABEL;
   }
 }
 
@@ -979,6 +1380,16 @@ async function copySettings(): Promise<void> {
     background: null,
     bakePaper: ws.bakePaper,
     ...(Object.keys(diff).length ? { params: diff } : {}),
+    ...(ws.mode === 'scene'
+      ? {
+          scene: ws.scene,
+          time: ws.time,
+          frameCount: ws.frameCount,
+          repaintEvery: ws.repaintEvery,
+          layoutSeed: ws.layoutSeed,
+          options: ws.sceneOptions,
+        }
+      : {}),
   };
   const text = JSON.stringify(payload, null, 2);
   try {

@@ -26,10 +26,14 @@
 
 import {
   FLAVORS,
+  getScene,
   PARAM_SPECS,
   parseColor,
   resolveParams,
+  resolveSceneOptions,
+  SCENES,
   type Flavor,
+  type SceneOptions,
   type WatercolorParams,
 } from '@watercolor/shapes';
 
@@ -50,6 +54,17 @@ export const EXPORT_VERSION = 1;
  * failing to save every workspace from then on.
  */
 export const MAX_SVG_CHARS = 1_000_000;
+
+/** Upper bound on one frame-sequence export. */
+export const MAX_FRAMES = 2000;
+/** Upper bound on how many frames a paint seed may be held for. */
+export const MAX_REPAINT = 600;
+
+/**
+ * What a workspace paints: a still SVG, or a scene - something drawn
+ * differently at every moment of a running time, like a plant growing.
+ */
+export type WorkspaceMode = 'svg' | 'scene';
 
 export interface Workspace {
   id: string;
@@ -74,6 +89,23 @@ export interface Workspace {
   overrideColor: boolean;
   color: string;
   liveQuality: number;
+  mode: WorkspaceMode;
+  /** Which scene, when `mode` is `scene`. The SVG is kept, so switching back loses nothing. */
+  scene: string;
+  /** Where in the scene the preview sits, 0 to 1. */
+  time: number;
+  /** How many frames an animation export writes, spread evenly from start to end. */
+  frameCount: number;
+  /**
+   * Hold each paint seed for this many frames. 1 repaints every frame, the
+   * way the live animation does; 2 or 3 at a higher frame rate gives the
+   * "on twos" look of drawn animation.
+   */
+  repaintEvery: number;
+  /** The scene's own seed - where its branches go - kept apart from the paint seed. */
+  layoutSeed: number;
+  /** The scene's knobs, always complete for the scene named by `scene`. */
+  sceneOptions: SceneOptions;
 }
 
 export interface Session {
@@ -109,6 +141,13 @@ export function createWorkspace(sampleIndex = 0, title?: string): Workspace {
     overrideColor: false,
     color: sample.color,
     liveQuality: 0.7,
+    mode: 'svg',
+    scene: SCENES[0].id,
+    time: 1,
+    frameCount: 120,
+    repaintEvery: 1,
+    layoutSeed: 1,
+    sceneOptions: resolveSceneOptions(SCENES[0].options),
   };
 }
 
@@ -116,6 +155,7 @@ export function cloneWorkspace(ws: Workspace, title?: string): Workspace {
   return {
     ...ws,
     params: { ...ws.params },
+    sceneOptions: { ...ws.sceneOptions },
     id: newId(),
     title: title ?? `${ws.title} copy`,
     titleAuto: false,
@@ -221,6 +261,15 @@ export function normalizeWorkspace(raw: unknown, fallbackTitle = 'Untitled'): Wo
   const seedRaw = src['seed'];
   const seedNum = typeof seedRaw === 'number' ? seedRaw : Number(seedRaw);
 
+  const anim = (src['animation'] ?? src) as Record<string, unknown>;
+  const sceneRaw = anim['scene'];
+  const sceneKnown = typeof sceneRaw === 'string' && getScene(sceneRaw) !== undefined;
+  // A scene this build does not have falls back to the SVG, which is always
+  // there, rather than to an empty stage.
+  const mode: WorkspaceMode = src['mode'] === 'scene' && sceneKnown ? 'scene' : 'svg';
+  const scene = sceneKnown ? (getScene(sceneRaw as string) as NonNullable<ReturnType<typeof getScene>>) : SCENES[0];
+  const optionsRaw = anim['options'];
+
   return {
     id: typeof src['id'] === 'string' && src['id'] ? (src['id'] as string) : newId(),
     title: str(src['title'], fallbackTitle, 60),
@@ -242,6 +291,16 @@ export function normalizeWorkspace(raw: unknown, fallbackTitle = 'Untitled'): Wo
     overrideColor: bool(fill['overrideColor'], false),
     color: normalizeHex(fill['color'], '#c07a3e'),
     liveQuality: num(src['liveQuality'], 0.7, 0.15, 1),
+    mode,
+    scene: scene.id,
+    time: num(anim['time'], 1, 0, 1),
+    frameCount: Math.round(num(anim['frameCount'], 120, 1, MAX_FRAMES)),
+    repaintEvery: Math.round(num(anim['repaintEvery'], 1, 1, MAX_REPAINT)),
+    layoutSeed: Math.round(num(anim['layoutSeed'], 1, 0, 0xffffffff)),
+    sceneOptions: resolveSceneOptions(
+      scene.options,
+      optionsRaw && typeof optionsRaw === 'object' ? (optionsRaw as Record<string, unknown>) : null,
+    ),
   };
 }
 
@@ -281,6 +340,15 @@ export function exportWorkspace(ws: Workspace): ExportPayload {
         color: ws.color,
       },
       liveQuality: ws.liveQuality,
+      mode: ws.mode,
+      animation: {
+        scene: ws.scene,
+        time: ws.time,
+        frameCount: ws.frameCount,
+        repaintEvery: ws.repaintEvery,
+        layoutSeed: ws.layoutSeed,
+        options: { ...ws.sceneOptions },
+      },
     },
   };
 }

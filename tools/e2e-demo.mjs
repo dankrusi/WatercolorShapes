@@ -95,7 +95,7 @@ try {
   // hard-coded, so retuning a default cannot break this test.
   const baseline = {
     flavor: await page.$eval('.flavors button[aria-pressed=true]', (e) => e.textContent.trim()),
-    seed: await page.$eval('input[type=number]', (e) => e.value),
+    seed: await page.$eval('input[aria-label="Seed"]', (e) => e.value),
   };
 
   // --- adding -------------------------------------------------------------
@@ -111,7 +111,7 @@ try {
   await clickButton('Granulate');
   await settle(1600);
   await page.evaluate(() => {
-    const seed = document.querySelector('input[type=number]');
+    const seed = document.querySelector('input[aria-label="Seed"]');
     seed.value = '4242';
     seed.dispatchEvent(new Event('change', { bubbles: true }));
   });
@@ -133,7 +133,7 @@ try {
   await page.evaluate(() => document.querySelectorAll('.tabs .tab .tab-label')[0].click());
   await settle(1600);
   const firstFlavor = await page.$eval('.flavors button[aria-pressed=true]', (e) => e.textContent.trim());
-  const firstSeed = await page.$eval('input[type=number]', (e) => e.value);
+  const firstSeed = await page.$eval('input[aria-label="Seed"]', (e) => e.value);
   check(
     'settings do not leak between workspaces',
     firstFlavor === baseline.flavor && firstSeed === baseline.seed,
@@ -149,7 +149,7 @@ try {
   check('workspaces survive a reload', afterReload.length === 3, JSON.stringify(afterReload));
   check('the active workspace survives a reload', (await activeTitle()) === 'Charcoal study', await activeTitle());
   const reloadedFlavor = await page.$eval('.flavors button[aria-pressed=true]', (e) => e.textContent.trim());
-  const reloadedSeed = await page.$eval('input[type=number]', (e) => e.value);
+  const reloadedSeed = await page.$eval('input[aria-label="Seed"]', (e) => e.value);
   check('its settings survive a reload', reloadedFlavor === 'Granulate' && reloadedSeed === '4242', `${reloadedFlavor} / ${reloadedSeed}`);
 
   const storedSvg = await page.evaluate(() => {
@@ -241,6 +241,56 @@ try {
   );
   const fps = Number(fpsText);
   check('animation holds its frame rate', fps >= 7 && fps <= 9.5, `measured ${fpsText}`);
+
+  // --- scenes -------------------------------------------------------------
+  await page.evaluate(() => {
+    [...document.querySelectorAll('button')].find((b) => b.textContent.includes('Animate')).click();
+  });
+  await settle(600);
+  await page.select('select', 'scene:plant');
+  await settle(7000);
+  const animGroup = () =>
+    page.evaluate(() => {
+      const g = [...document.querySelectorAll('.group')].find(
+        (x) => x.querySelector('h2')?.textContent === 'Animation',
+      );
+      return g ? getComputedStyle(g).display : 'missing';
+    });
+  const frameStat = () =>
+    page.evaluate(() => document.querySelectorAll('.stage-foot b')[5]?.textContent ?? '');
+  const shapeCount = () =>
+    page.evaluate(() => Number(document.querySelectorAll('.stage-foot b')[4].textContent));
+  check('picking a scene shows the animation controls', (await animGroup()) === 'block', await animGroup());
+  check('the footer counts the frame', /^120\/120/.test(await frameStat()), await frameStat());
+  const finishedShapes = await shapeCount();
+  check('the finished plant is many shapes', finishedShapes > 30, String(finishedShapes));
+  await page.evaluate(() => {
+    const g = [...document.querySelectorAll('.group')].find(
+      (x) => x.querySelector('h2')?.textContent === 'Animation',
+    );
+    const input = g.querySelector('input[type=range]');
+    input.value = '0.1';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await settle(3000);
+  const earlyShapes = await shapeCount();
+  check(
+    'scrubbing back in time draws fewer shapes',
+    earlyShapes >= 1 && earlyShapes < finishedShapes,
+    `${earlyShapes} vs ${finishedShapes}`,
+  );
+  check('the frame counter follows the time', /^13\/120/.test(await frameStat()), await frameStat());
+  await page.reload({ waitUntil: 'networkidle0' });
+  await rendered();
+  await settle(3000);
+  check(
+    'the scene and its time survive a reload',
+    (await animGroup()) === 'block' && /^13\/120/.test(await frameStat()),
+    `${await animGroup()} / ${await frameStat()}`,
+  );
+  await page.select('select', 'Leaf');
+  await settle(2500);
+  check('picking a shape hides the animation controls', (await animGroup()) === 'none', await animGroup());
 
   check('no page errors', pageErrors.length === 0, pageErrors.join('\n    '));
 } finally {

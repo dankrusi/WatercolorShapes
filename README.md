@@ -12,8 +12,9 @@ stepping the seed gives another take on the same shape.
 
 ```
 packages/watercolor   @watercolor/shapes — the library (no dependencies)
+  src/scenes/         animations: shapes as a function of time (the growing plant)
 apps/demo             the interactive demo (Vite)
-tools/                reference-fitting and comparison harness
+tools/                reference-fitting, comparison and scene-rendering harness
 references/           the three paintings the renderer was fitted against
 ```
 
@@ -25,6 +26,7 @@ pnpm dev        # interactive demo on http://localhost:5173
 pnpm test       # library and demo test suites
 pnpm build      # library + demo
 pnpm e2e        # browser check of the demo, against a running preview
+pnpm scene      # render the plant animation's frames to out-scene/
 ```
 
 ```ts
@@ -96,6 +98,78 @@ arriving from a file or from storage is re-validated: unknown parameters are
 dropped, known ones are clamped to the ranges the sliders declare, and one bad
 field can never take the app down on start-up.
 
+### Animations
+
+Under **Animations** in the Source menu is **Plant growing**: a ten-second
+scene in which a seed swells, puts a pale root down and a hooked shoot up,
+rides the shoot a little way and is shed; the shoot straightens into a stem
+while the taproot branches and branches again; a bud at the tip opens into a
+large ochre leaf, then a dark leaf and a small pale one open lower down; and
+the last second holds on the finished plant.
+
+A scene is drawn afresh at every moment as a list of shapes - a hundred of
+them by the end, each root, leaf and vein its own stroke in its own shade -
+and that list goes through the renderer exactly as an SVG does. The flavor,
+every slider, the paper, the seed: all of it applies to the whole frame, and
+all of the frame's shapes are washes on one sheet. Where strokes cross they
+glaze, the paper goes in once underneath them all, and the paper grain goes
+on once over them all at the end.
+
+The **Animation** group appears when a scene is loaded:
+
+- **Time** scrubs through the scene. The footer shows which export frame
+  that moment falls on.
+- **Play** steps through the export frames in order, each rendered at full
+  quality - exactly what the export will write. It holds the scene's own pace
+  on a machine that can render that fast and simply runs slower on one that
+  cannot; nothing is trimmed and no frame is skipped. The footer's fps shows
+  the pace it is managing.
+- **frames** is how many frames an export writes, spread evenly from the
+  start to the end; the last frame is always the finished scene. 120 frames
+  of a 10 s scene is 12 fps, 240 is 24 fps. The group shows the rate.
+- **repaint every** holds each paint seed for that many frames. 1 repaints
+  every frame, the hand-drawn boil the seed animation has; 2 or 3 at 24 fps
+  gives the look of animation drawn on twos or threes.
+- **Layout seed** moves what the scene leaves to chance - where the roots
+  branch - without touching the paint. The stem and the three leaves are
+  drawn to a reference and do not move.
+- Below those, the scene's own knobs: how many main roots leave the crown,
+  how much they branch, how wide and how deep they go, the stem height, how
+  many of the three leaves open, their size, the strength of the veins, and
+  **root stability**: at 1 the roots hold still; lower, they are redrawn a
+  little differently each time the paint seed changes, so they boil with the
+  paint on the same *repaint every* cadence, the tips most and the crown not
+  at all. A scene declares these as slider metadata, so the panel is built
+  from them and they travel with the workspace; **Reset plant** puts them
+  back.
+
+**Save animation frames…** asks for a folder and renders the whole scene at
+export quality, one numbered PNG per frame, transparent outside the painting
+with Bake paper honoured inside it. It renders at full quality, one frame at a
+time, so a long sequence at a large size takes a while; the status line
+counts the frames and the button cancels. Assemble the sequence with
+anything that reads numbered files, for example:
+
+```bash
+ffmpeg -framerate 12 -i plant-growing-wash-%04d.png -c:v libvpx-vp9 -pix_fmt yuva420p plant.webm
+```
+
+Every one of these settings is part of the workspace, so it is saved, exported
+and imported with everything else. A workspace that names a scene this build
+does not have falls back to its SVG rather than to an empty stage.
+
+The same thing from the command line, with a contact sheet to check the motion
+at a glance:
+
+```bash
+node --import tsx tools/render-scene.ts --frames 24 --width 480 --contact 6 --out out-scene
+```
+
+A scene is a small object - an id, a viewBox, a duration, and a pure function
+from a time in 0..1 to a shape list - so another one is a file in
+`packages/watercolor/src/scenes/` and an entry in its registry. The stroke
+helpers that outline a centreline with a width profile are exported too.
+
 ### Exporting a PNG
 
 The PNG is always transparent outside the shape. **Bake paper** decides what
@@ -125,6 +199,14 @@ an invented light: the gradient's own light-to-dark run becomes the pigment
 load, so a radial-gradient sphere comes out modelled the way the artwork asked
 for, still granulating and edge-darkening on top. Solid fills get form shading
 instead (see below).
+
+Two optional fields matter for shapes that change between frames. A shape's
+paint is normally seeded from its position in the list, so adding one ahead
+of it repaints it; `seed` gives a shape a seed of its own, stable for as long
+as the render seed is held. And the texture is normally scaled to the shape's
+bounding box, so a growing shape's mottling zooms with it and its edge crawls;
+`noiseSize` pins that scale, in the shape's own units, to what the shape will
+finally be. The plant scene sets both on every stroke.
 
 ## Output
 
@@ -208,6 +290,23 @@ rather than a lit form.
 where a dry brush skips, where the edge pins, and how much water a cell holds
 in the simulation — which is what makes them read as one surface.
 
+**One sheet, many washes.** A frame of any number of shapes is painted onto a
+single sheet in order. Each shape is worked in a window just large enough to
+hold it and every effect that reaches past its outline, and its textures are
+evaluated only where its paint will land, so the cost of a frame follows the
+paint rather than the paper: a hundred root hairs cost a hundred root hairs,
+not a hundred canvases. Later washes composite through Kubelka-Munk against
+whatever the earlier ones left, and against the lookup table wherever the
+paper is still bare. The paper colour goes in once underneath everything and
+the grain once over it, at the end.
+
+**Thin shapes are not small discs.** The edge effects are scaled to the shape
+size, and the bounding box of a root hair or a stroke of lettering says it is
+large. Scaled to that, the wobble is wider than the shape and breaks it into
+beads. Below a quarter inscribed-diameter-to-size, the edge effects scale down
+with the square root of that ratio instead; every solid shape sits above the
+knee and is untouched.
+
 ## Fitted against the references
 
 `references/` holds three watercolour shapes. Their geometry was measured off
@@ -277,6 +376,14 @@ and a seed step.
 `fluid` is the outlier by design — it is running a fluid simulation. Lower
 `fluidSteps` if you want it in an animation.
 
+A frame of the finished plant - 99 strokes, most of them a few pixels wide -
+is about 1.1 s at 640px ss2 and 0.4 s at the demo's live size, which is what
+the per-shape windows and the masked texture evaluation buy: the same frame
+cost 3 s and 1.5 s with every shape textured across its whole window, and
+would cost a hundred times a single shape without the windows. A full export
+of 120 frames at 1024px ss2 is a coffee's worth of waiting, by design: it
+renders at full quality, one frame at a time.
+
 ## API
 
 `render(options)` is the whole surface. See `packages/watercolor/src/types.ts`
@@ -285,6 +392,11 @@ the slider metadata the demo builds its panel from, so the two cannot drift
 apart. Also exported: `parseSvg`, the Kubelka-Munk primitives, the path
 flattener and rasteriser, the paper generator, and `simulateWash` if you want
 the fluid solver on its own.
+
+Scenes: `SCENES`, `getScene(id)`, `plantScene` and the `Scene` type, plus the
+stroke helpers (`strokePath`, `cubicBezier`, `arcLengths`, `pointAlong`,
+`cutPolyline`, `bendTip`, `ovoid`) for building more. A frame is
+`render({ shapes: scene.frame(t, layoutSeed), viewBox: scene.viewBox, ... })`.
 
 ## Licence
 

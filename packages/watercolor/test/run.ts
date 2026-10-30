@@ -21,6 +21,7 @@ import {
   srgbToLinear,
   type Flavor,
 } from '../src/index.js';
+import { getScene, plantScene, SCENES } from '../src/scenes/index.js';
 import { solvePigment } from '../src/color/solve.js';
 import { compositePigment } from '../src/color/km.js';
 import { Rng } from '../src/rng.js';
@@ -694,6 +695,190 @@ test('flavor presets stay inside their declared slider ranges', async () => {
       assert(key in BASE_PARAMS, `${flavor} preset sets unknown parameter "${key}"`);
     }
   }
+});
+
+// ------------------------------------------------------------ many shapes --
+
+/** Worst channel difference between two renders over a pixel rectangle. */
+function worstOver(
+  a: Uint8ClampedArray,
+  b: Uint8ClampedArray,
+  width: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+): number {
+  let worst = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const i = (y * width + x) * 4;
+      for (let ch = 0; ch < 4; ch++) worst = Math.max(worst, Math.abs(a[i + ch] - b[i + ch]));
+    }
+  }
+  return worst;
+}
+
+const FAR = {
+  viewBox: { x: 0, y: 0, width: 300, height: 160 },
+  width: 300,
+  supersample: 1,
+  padding: 0,
+  fit: 'none' as const,
+  seed: 4,
+};
+const NEAR_CORNER = { path: 'M10 10 H50 V50 H10 Z', color: '#7a4a2a', seed: 'a' };
+const FAR_CORNER = { path: 'M250 110 H290 V150 H250 Z', color: '#2f5d7c', seed: 'b' };
+
+test('shapes far apart paint independently of each other', () => {
+  // Each shape is worked in its own window, so a second shape elsewhere on
+  // the sheet cannot change the first by so much as a bit.
+  const alone = render({ ...FAR, shapes: [NEAR_CORNER] });
+  const both = render({ ...FAR, shapes: [NEAR_CORNER, FAR_CORNER] });
+  assert(alone.width === both.width, 'same size');
+  const worst = worstOver(alone.data, both.data, 300, 0, 0, 70, 70);
+  assert(worst === 0, `adding a distant shape changed the first by ${worst}`);
+});
+
+test('a shape with its own seed paints the same wherever it sits in the list', () => {
+  const first = render({ ...FAR, shapes: [NEAR_CORNER, FAR_CORNER] });
+  const second = render({ ...FAR, shapes: [FAR_CORNER, NEAR_CORNER] });
+  const worst = worstOver(first.data, second.data, 300, 0, 0, 70, 70);
+  assert(worst === 0, `reordering changed a seeded shape by ${worst}`);
+});
+
+test('without its own seed, a shape is still seeded by its position', () => {
+  // The behaviour every existing render relies on: the list order is the seed.
+  const a = { ...NEAR_CORNER, seed: undefined };
+  const b = { ...FAR_CORNER, seed: undefined };
+  const first = render({ ...FAR, shapes: [a, b] });
+  const second = render({ ...FAR, shapes: [b, a] });
+  const worst = worstOver(first.data, second.data, 300, 0, 0, 70, 70);
+  assert(worst > 8, `reordering unseeded shapes barely changed the paint (${worst})`);
+});
+
+test('thin shapes keep continuous coverage', () => {
+  // A 2px hair the full width of a 400px sheet. Edge effects scaled to its
+  // bounding box would be wider than it is and break it into beads.
+  const r = render({
+    path: 'M10 199 H390 V201 H10 Z',
+    color: '#333333',
+    viewBox: { x: 0, y: 0, width: 400, height: 400 },
+    width: 400,
+    supersample: 1,
+    padding: 0,
+    fit: 'none',
+    seed: 3,
+    background: null,
+    bakePaper: true,
+  });
+  let gaps = 0;
+  for (let x = 20; x < 380; x++) {
+    let covered = false;
+    for (let y = 196; y < 204; y++) if (r.data[(y * 400 + x) * 4 + 3] > 100) covered = true;
+    if (!covered) gaps++;
+  }
+  assert(gaps === 0, `the hair broke in ${gaps} columns`);
+});
+
+test('a pinned noise size keeps the paint still while the outline grows', () => {
+  // The same bar at two lengths. With the noise size pinned to the final
+  // length, the part they share is painted identically; left to the bounding
+  // box, the texture re-scales with the length and the shared part differs.
+  const common = {
+    viewBox: { x: 0, y: 0, width: 300, height: 300 },
+    width: 300,
+    supersample: 1,
+    padding: 0,
+    fit: 'none' as const,
+    seed: 9,
+    params: { shading: 0, ambientOcclusion: 0, pigmentDrift: 0, edgeDarkening: 0, paperTexture: 0 },
+  };
+  const bar = (length: number, noiseSize?: number) =>
+    render({
+      ...common,
+      shapes: [{ path: `M20 140 H${20 + length} V160 H20 Z`, color: '#7a4a2a', seed: 'bar', noiseSize }],
+    });
+  const pinnedWorst = worstOver(bar(140, 260).data, bar(240, 260).data, 300, 30, 142, 120, 158);
+  const looseWorst = worstOver(bar(140).data, bar(240).data, 300, 30, 142, 120, 158);
+  // Not quite zero: each shape's pigment is normalised over its own mask, and
+  // the longer bar averages a little more texture into that normalisation.
+  assert(pinnedWorst <= 4, `pinned texture moved by ${pinnedWorst}`);
+  assert(looseWorst > 12, `unpinned texture should have re-scaled (${looseWorst})`);
+});
+
+// ----------------------------------------------------------------- scenes --
+
+test('the scene registry finds scenes by id', () => {
+  assert(SCENES.length >= 1, 'at least one scene');
+  assert(getScene('plant') === plantScene, 'plant by id');
+  assert(getScene('cathedral') === undefined, 'unknown id');
+  assert(plantScene.duration > 0 && plantScene.viewBox.width > 0, 'scene metadata');
+});
+
+test('the plant grows: more shapes and more paint as time passes', () => {
+  const times = [0, 0.15, 0.35, 0.6, 1];
+  const frames = times.map((t) => plantScene.frame(t, 1));
+  assert(frames[0].length === 1, `the start should be one seed, got ${frames[0].length}`);
+  assert(frames[4].length > 30, `the finished plant should be many strokes, got ${frames[4].length}`);
+  const extent = (shapes: ReturnType<typeof plantScene.frame>): number => {
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const s of shapes) {
+      const b = contourBounds(flattenPath(s.path, undefined, 0.5));
+      if (b.h <= 0) continue;
+      minY = Math.min(minY, b.y);
+      maxY = Math.max(maxY, b.y + b.h);
+    }
+    return maxY - minY;
+  };
+  const extents = frames.map(extent);
+  for (let i = 1; i < extents.length; i++) {
+    assert(extents[i] >= extents[i - 1] - 1e-6, `the plant shrank between ${times[i - 1]} and ${times[i]}`);
+  }
+  assert(extents[4] > plantScene.viewBox.height * 0.7, `the finished plant only spans ${extents[4]} units`);
+});
+
+test('plant frames are deterministic and the layout seed moves the roots', () => {
+  const a = JSON.stringify(plantScene.frame(0.7, 1));
+  const b = JSON.stringify(plantScene.frame(0.7, 1));
+  const c = JSON.stringify(plantScene.frame(0.7, 2));
+  assert(a === b, 'the same time and layout seed gave different shapes');
+  assert(a !== c, 'a different layout seed gave the same shapes');
+});
+
+test('every plant stroke carries a stable seed, a noise size and a usable path', () => {
+  for (const t of [0.12, 0.5, 1]) {
+    const ids = new Set<string>();
+    for (const s of plantScene.frame(t, 1)) {
+      assert(s.seed !== undefined, `a shape at t=${t} has no seed`);
+      assert(!ids.has(String(s.seed)), `duplicate shape seed ${String(s.seed)} at t=${t}`);
+      ids.add(String(s.seed));
+      assert((s.noiseSize ?? 0) > 0, `shape ${String(s.seed)} has no noise size`);
+      const b = contourBounds(flattenPath(s.path, undefined, 0.5));
+      assert(b.w > 0 && b.h > 0, `shape ${String(s.seed)} at t=${t} has an empty path`);
+      assert(
+        b.x >= 0 && b.y >= 0 && b.x + b.w <= plantScene.viewBox.width && b.y + b.h <= plantScene.viewBox.height,
+        `shape ${String(s.seed)} at t=${t} leaves the viewBox`,
+      );
+    }
+  }
+});
+
+test('a scene frame renders through the ordinary pipeline', () => {
+  const r = render({
+    shapes: plantScene.frame(0.5, 1),
+    viewBox: plantScene.viewBox,
+    width: 96,
+    supersample: 1,
+    seed: 1,
+    background: null,
+    bakePaper: true,
+  });
+  let ink = 0;
+  for (let i = 3; i < r.data.length; i += 4) if (r.data[i] > 128) ink++;
+  assert(ink > 200, `the half-grown plant covered only ${ink} pixels`);
+  assert(r.data[3] === 0, 'the corner should be transparent');
 });
 
 // ------------------------------------------------------------------ done --
